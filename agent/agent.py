@@ -44,7 +44,7 @@ import anthropic
 # CONFIGURATION
 # ============================================================================
 
-MODEL = "claude-3-5-haiku-20241022"
+MODEL = "claude-haiku-4-5"
 MAX_TOKENS = 4096
 
 # Where the agent writes its output (picked up by the second Actions job)
