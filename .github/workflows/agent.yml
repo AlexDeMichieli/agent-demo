@@ -109,9 +109,96 @@ jobs:
       - name: Display generated diff
         run: cat agent-output/fix.diff
 
-      # Apply the diff to the repo and open a PR
+      # ================================================================
+      # VALIDATION GATE (deterministic, no LLM)
+      #
+      # The agent's output is UNTRUSTED INPUT. We validate it the same
+      # way we'd validate user-submitted code. All checks here are
+      # deterministic — no LLM opinions, just hard rules.
+      #
+      # Building blocks: L06 (trustworthy agents), L09 (validation)
+      # ================================================================
+      - name: Validate agent output
+        run: |
+          echo "=== VALIDATING AGENT OUTPUT ==="
+
+          # 1. Diff size check — if it's huge, the agent may be going rogue
+          LINES=$(wc -l < agent-output/fix.diff)
+          echo "Diff size: $LINES lines"
+          if [ "$LINES" -gt 500 ]; then
+            echo "FAIL: Diff is $LINES lines. Max allowed: 500."
+            exit 1
+          fi
+          echo "PASS: Diff size OK"
+
+          # 2. Path check — only allow changes to src/ and tests/
+          #    Prevents the agent from modifying workflows, configs, etc.
+          PATHS=$(grep "^+++ b/" agent-output/fix.diff | sed 's|+++ b/||' || true)
+          if [ -n "$PATHS" ]; then
+            for P in $PATHS; do
+              case "$P" in
+                src/*|tests/*) echo "PASS: Allowed path: $P" ;;
+                *) echo "FAIL: Diff touches forbidden path: $P"; exit 1 ;;
+              esac
+            done
+          fi
+          echo "PASS: All paths OK"
+
+          # 3. Secret scan — reject if diff contains anything that looks like a key
+          if grep -iE "(api_key|password|secret_key|access_token|private_key)\s*=" agent-output/fix.diff; then
+            echo "FAIL: Diff may contain secrets"
+            exit 1
+          fi
+          echo "PASS: No secrets detected"
+
+          # 4. No binary content
+          if grep -P '\x00' agent-output/fix.diff 2>/dev/null; then
+            echo "FAIL: Diff contains binary content"
+            exit 1
+          fi
+          echo "PASS: No binary content"
+
+          echo "=== ALL VALIDATION CHECKS PASSED ==="
+
+      # Apply the diff, run tests, then open the PR
       # This is deterministic — no LLM involved
-      - name: Apply fix and create PR
+      - name: Apply fix
+        run: |
+          # Apply the diff
+          # Try multiple strategies since LLM-generated diffs can be slightly malformed
+          if git apply agent-output/fix.diff 2>/dev/null; then
+            echo "Diff applied cleanly with git apply"
+          elif git apply --3way agent-output/fix.diff 2>/dev/null; then
+            echo "Diff applied with 3-way merge"
+          elif patch -p1 < agent-output/fix.diff 2>/dev/null; then
+            echo "Diff applied with patch command"
+          else
+            echo "WARNING: Diff failed to apply. Trying direct file replacement..."
+            if [ -d agent-output/files ]; then
+              cp -r agent-output/files/* .
+              echo "Applied full file replacements"
+            else
+              echo "ERROR: All apply methods failed. Dumping diff:"
+              cat agent-output/fix.diff
+              exit 1
+            fi
+          fi
+
+      # 5. Run tests AFTER applying the fix — the ultimate validation gate
+      #    If the fix breaks tests, we don't open a PR. (L09 metacognition)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests after fix
+        run: |
+          echo "=== RUNNING TESTS AFTER FIX ==="
+          python -m pytest tests/ -v
+          echo "=== ALL TESTS PASSED ==="
+
+      # If we get here, validation passed and tests pass → open the PR
+      - name: Create PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
@@ -125,28 +212,7 @@ jobs:
           BRANCH="agent/fix-issue-${ISSUE_NUMBER}"
           git checkout -b "$BRANCH"
 
-          # Apply the diff
-          # Try multiple strategies since LLM-generated diffs can be slightly malformed
-          if git apply agent-output/fix.diff 2>/dev/null; then
-            echo "Diff applied cleanly with git apply"
-          elif git apply --3way agent-output/fix.diff 2>/dev/null; then
-            echo "Diff applied with 3-way merge"
-          elif patch -p1 < agent-output/fix.diff 2>/dev/null; then
-            echo "Diff applied with patch command"
-          else
-            echo "WARNING: Diff failed to apply. Trying direct file replacement..."
-            # Fallback: if the agent also output full files, use those
-            if [ -d agent-output/files ]; then
-              cp -r agent-output/files/* .
-              echo "Applied full file replacements"
-            else
-              echo "ERROR: All apply methods failed. Dumping diff:"
-              cat agent-output/fix.diff
-              exit 1
-            fi
-          fi
-
-          # Commit and push
+          # Stage and commit
           git add -A
           git commit -m "Agent fix for #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
           git push origin "$BRANCH"
