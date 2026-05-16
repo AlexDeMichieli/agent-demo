@@ -236,13 +236,11 @@ jobs:
               });
               console.log(`PR created: ${pr.html_url}`);
             } catch (error) {
-              const errorMessage = error.response?.data?.message || '';
+              const errorMessage = error.response?.data?.message;
               if (
                 error.status === 403 &&
-                (
-                  errorMessage === 'GitHub Actions is not permitted to create or approve pull requests.' ||
-                  errorMessage.includes('create or approve pull requests')
-                )
+                typeof errorMessage === 'string' &&
+                errorMessage.includes('create or approve pull requests')
               ) {
                 core.warning(
                   'Skipping PR creation because repository settings currently disallow GitHub Actions from creating PRs.'
