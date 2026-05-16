@@ -126,14 +126,24 @@ jobs:
           git checkout -b "$BRANCH"
 
           # Apply the diff
-          # --allow-empty: don't fail if the diff doesn't change anything
-          # If git apply fails, the PR won't be created (safe failure)
-          if git apply agent-output/fix.diff; then
-            echo "Diff applied successfully"
+          # Try multiple strategies since LLM-generated diffs can be slightly malformed
+          if git apply agent-output/fix.diff 2>/dev/null; then
+            echo "Diff applied cleanly with git apply"
+          elif git apply --3way agent-output/fix.diff 2>/dev/null; then
+            echo "Diff applied with 3-way merge"
+          elif patch -p1 < agent-output/fix.diff 2>/dev/null; then
+            echo "Diff applied with patch command"
           else
-            echo "ERROR: Failed to apply diff. Dumping diff for debugging:"
-            cat agent-output/fix.diff
-            exit 1
+            echo "WARNING: Diff failed to apply. Trying direct file replacement..."
+            # Fallback: if the agent also output full files, use those
+            if [ -d agent-output/files ]; then
+              cp -r agent-output/files/* .
+              echo "Applied full file replacements"
+            else
+              echo "ERROR: All apply methods failed. Dumping diff:"
+              cat agent-output/fix.diff
+              exit 1
+            fi
           fi
 
           # Commit and push

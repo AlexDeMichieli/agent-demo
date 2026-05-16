@@ -108,7 +108,7 @@ def read_codebase(repo_path):
     Read all Python source and test files from the repo.
     
     RAG NOTE (L05): This works because our repo is tiny (~100 lines).
-    For Mercury's monorepo (thousands of files), you would NOT do this.
+    For a large monorepo (thousands of files), you would NOT do this.
     Instead you'd:
       1. Chunk code by function/class using AST parsing
       2. Embed chunks with a code-optimized model
@@ -226,31 +226,29 @@ def step_code(issue, codebase, plan):
     """
     STEP 2: CODER (L08)
     
-    Receives the plan from step 1 and generates a unified diff.
-    The coder follows the plan — it doesn't re-analyze the bug.
+    Receives the plan from step 1 and generates the fixed file contents.
     
-    Output format is a unified diff so it can be applied with `git apply`.
+    Instead of generating a diff (which LLMs often malformat), we ask
+    for both a diff AND the full corrected files. The workflow tries
+    the diff first and falls back to full file replacement.
     """
     log("CODER", "Generating fix based on plan...")
 
     system_prompt = """\
 You are a coding agent. You receive a plan from the planner and write the fix.
 
-Rules:
-- Output ONLY a valid unified diff (the kind you'd get from `git diff`)
-- The diff must be applicable with `git apply`
-- Make the minimal change needed — don't refactor unrelated code
-- Include proper --- a/ and +++ b/ headers
-- No explanation text, just the diff
+You MUST output TWO sections:
 
-Example format:
---- a/src/cart.py
-+++ b/src/cart.py
-@@ -10,6 +10,8 @@
- existing code
--removed line
-+added line
- existing code"""
+1. A unified diff (for `git apply`). Use exact --- a/ and +++ b/ headers.
+2. The FULL corrected file contents, wrapped like this:
+   === FILE: src/cart.py ===
+   (entire file content here)
+   === END FILE ===
+
+Rules:
+- Make the minimal change needed
+- Don't refactor unrelated code
+- Output BOTH the diff AND the full file"""
 
     user_message = f"""\
 ## Plan to follow
@@ -259,15 +257,9 @@ Example format:
 ## Current codebase
 {codebase}"""
 
-    diff = call_claude(system_prompt, user_message)
-    
-    # Clean up: sometimes Claude wraps the diff in ```
-    if diff.startswith("```"):
-        lines = diff.split("\n")
-        diff = "\n".join(lines[1:-1]) if lines[-1].strip() == "```" else "\n".join(lines[1:])
-
-    log("CODER", f"Diff generated ({len(diff.splitlines())} lines)")
-    return diff
+    response = call_claude(system_prompt, user_message)
+    log("CODER", f"Response generated ({len(response.splitlines())} lines)")
+    return response
 
 
 def step_review(issue, plan, diff, test_output):
@@ -380,8 +372,40 @@ def main():
     with open(os.path.join(OUTPUT_DIR, "plan.md"), "w") as f:
         f.write(f"# Plan for Issue #{state['issue']['number']}\n\n{state['plan']}")
 
+    # Parse the coder's response into diff + full files
+    coder_output = state["diff"]
+    
+    # Extract the diff portion (everything before === FILE:)
+    diff_part = coder_output.split("=== FILE:")[0].strip()
+    # Clean up markdown code fences if present
+    if "```diff" in diff_part:
+        diff_part = diff_part.split("```diff")[-1].split("```")[0].strip()
+    elif "```" in diff_part:
+        diff_part = diff_part.split("```")[1].split("```")[0].strip()
+    
     with open(os.path.join(OUTPUT_DIR, "fix.diff"), "w") as f:
-        f.write(state["diff"])
+        f.write(diff_part)
+
+    # Extract full file replacements as a fallback
+    files_dir = os.path.join(OUTPUT_DIR, "files")
+    if "=== FILE:" in coder_output:
+        os.makedirs(files_dir, exist_ok=True)
+        parts = coder_output.split("=== FILE:")
+        for part in parts[1:]:  # skip everything before first === FILE:
+            if "=== END FILE ===" in part:
+                header, content = part.split("\n", 1)
+                filepath = header.strip().rstrip("=").strip()
+                content = content.split("=== END FILE ===")[0].strip()
+                # Clean markdown fences if present
+                if content.startswith("```"):
+                    content = "\n".join(content.split("\n")[1:])
+                if content.endswith("```"):
+                    content = "\n".join(content.split("\n")[:-1])
+                full_path = os.path.join(files_dir, filepath)
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                with open(full_path, "w") as f:
+                    f.write(content + "\n")
+                log("OUTPUT", f"Wrote full file: {filepath}")
 
     with open(os.path.join(OUTPUT_DIR, "summary.md"), "w") as f:
         f.write(f"# Review Summary\n\n{state['review']}")
