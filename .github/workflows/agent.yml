@@ -1,0 +1,162 @@
+# Background Coding Agent Workflow
+#
+# BUILDING BLOCKS DEMONSTRATED:
+#   L01 - Agent Loop:         agent.py runs the full plan → code → review loop
+#   L06 - Capability Sep:     Job 1 (agent) is READ-ONLY, Job 2 (apply) has WRITE
+#   L10 - Observability:      Every step is logged in Actions, visible in run history
+#   Sandbox concept:          Agent runs in an ephemeral runner, destroyed after
+#
+# TRIGGER: When an issue gets the "agent-fix" label
+# FLOW:    agent job (read-only) → apply job (write, opens PR)
+
+name: Background Coding Agent
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  # ==========================================================================
+  # JOB 1: AGENT (READ-ONLY SANDBOX)
+  #
+  # This job runs the LLM-powered agent. It can READ the repo and the issue,
+  # but CANNOT write to the repo, push branches, or open PRs.
+  #
+  # The agent outputs artifacts (plan, diff, summary) that the next job picks up.
+  #
+  # Building blocks:
+  #   L06 - The agent has no write tokens. Even if prompt-injected, it can't
+  #         push code or modify the repo. The sandbox is enforced by Actions
+  #         permissions, not by the agent's own code.
+  # ==========================================================================
+  agent:
+    # Only run when the label is "agent-fix"
+    if: github.event.label.name == 'agent-fix'
+    runs-on: ubuntu-latest
+
+    # PERMISSIONS: read-only. The agent CANNOT write to the repo.
+    permissions:
+      contents: read
+      issues: read
+
+    steps:
+      - name: Checkout repo (read-only)
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Run the agent. It reads the issue from GITHUB_EVENT_PATH (set by Actions)
+      # and writes output to agent-output/
+      - name: Run coding agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python agent/agent.py \
+            --issue-number ${{ github.event.issue.number }} \
+            --repo-path .
+
+      # Upload the agent's output as an artifact.
+      # This is the ONLY thing that leaves the sandbox.
+      # The apply job downloads this artifact and uses it.
+      - name: Upload agent output
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-output
+          path: agent-output/
+
+  # ==========================================================================
+  # JOB 2: APPLY (SCOPED WRITE ACCESS, NO LLM)
+  #
+  # This job takes the agent's output and opens a PR. It has write access
+  # but does NOT run any LLM. It's purely deterministic.
+  #
+  # Building blocks:
+  #   L06 - Capability separation: "the component with power is not an LLM"
+  #         This job can write but doesn't think. The agent thinks but can't write.
+  # ==========================================================================
+  apply:
+    needs: agent
+    runs-on: ubuntu-latest
+
+    # PERMISSIONS: write access to create branches and PRs
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download agent output
+        uses: actions/download-artifact@v4
+        with:
+          name: agent-output
+          path: agent-output/
+
+      # Show what the agent produced (observability / debug)
+      - name: Display agent plan
+        run: cat agent-output/plan.md
+
+      - name: Display agent review
+        run: cat agent-output/summary.md
+
+      - name: Display generated diff
+        run: cat agent-output/fix.diff
+
+      # Apply the diff to the repo and open a PR
+      # This is deterministic — no LLM involved
+      - name: Apply fix and create PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          # Configure git
+          git config user.name "coding-agent[bot]"
+          git config user.email "coding-agent[bot]@users.noreply.github.com"
+
+          # Create a branch for the fix
+          BRANCH="agent/fix-issue-${ISSUE_NUMBER}"
+          git checkout -b "$BRANCH"
+
+          # Apply the diff
+          # --allow-empty: don't fail if the diff doesn't change anything
+          # If git apply fails, the PR won't be created (safe failure)
+          if git apply agent-output/fix.diff; then
+            echo "Diff applied successfully"
+          else
+            echo "ERROR: Failed to apply diff. Dumping diff for debugging:"
+            cat agent-output/fix.diff
+            exit 1
+          fi
+
+          # Commit and push
+          git add -A
+          git commit -m "Agent fix for #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
+          git push origin "$BRANCH"
+
+          # Read the summary for the PR body
+          PLAN=$(cat agent-output/plan.md)
+          SUMMARY=$(cat agent-output/summary.md)
+
+          # Open the PR — human reviews before merge (L06 human-in-the-loop)
+          gh pr create \
+            --title "Agent: fix #${ISSUE_NUMBER} - ${ISSUE_TITLE}" \
+            --body "## Automated Fix for #${ISSUE_NUMBER}
+
+          ${PLAN}
+
+          ---
+
+          ${SUMMARY}
+
+          ---
+          *This PR was generated by a background coding agent. Please review before merging.*" \
+            --head "$BRANCH" \
+            --base main
