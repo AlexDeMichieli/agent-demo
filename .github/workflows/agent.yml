@@ -194,6 +194,7 @@ jobs:
       - name: Run tests after fix
         run: |
           echo "=== RUNNING TESTS AFTER FIX ==="
+          pip install pytest
           python -m pytest tests/ -v
           echo "=== ALL TESTS PASSED ==="
 
