@@ -236,9 +236,10 @@ jobs:
               });
               console.log(`PR created: ${pr.html_url}`);
             } catch (error) {
+              const errorStatus = error.status ?? error.response?.status;
               const errorMessage = error.response?.data?.message;
               if (
-                error.status === 403 &&
+                errorStatus === 403 &&
                 typeof errorMessage === 'string' &&
                 errorMessage.includes('create or approve pull requests')
               ) {
