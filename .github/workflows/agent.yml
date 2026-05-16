@@ -236,10 +236,12 @@ jobs:
               });
               console.log(`PR created: ${pr.html_url}`);
             } catch (error) {
+              const errorMessage = error.response?.data?.message || '';
               if (
                 error.status === 403 &&
-                error.response?.data?.message?.includes(
-                  'GitHub Actions is not permitted to create or approve pull requests.'
+                (
+                  errorMessage === 'GitHub Actions is not permitted to create or approve pull requests.' ||
+                  errorMessage.includes('create or approve pull requests')
                 )
               ) {
                 core.warning(
