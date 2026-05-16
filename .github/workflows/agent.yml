@@ -238,7 +238,9 @@ jobs:
             } catch (error) {
               if (
                 error.status === 403 &&
-                error.response?.data?.message?.includes('not permitted to create or approve pull requests')
+                error.response?.data?.message?.includes(
+                  'GitHub Actions is not permitted to create or approve pull requests.'
+                )
               ) {
                 core.warning(
                   'Skipping PR creation because repository settings currently disallow GitHub Actions from creating PRs.'
