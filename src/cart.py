@@ -27,12 +27,6 @@ def apply_discount(total, discount_code):
     Known bug: crashes with TypeError when discount_code is None
     instead of returning the original total.
     """
-    # BUG: This raises TypeError when discount_code is None
-    # because None is not a valid dict key lookup... actually it works
-    # but the REAL bug is we should handle None gracefully
-    if discount_code is None:
-        raise TypeError("discount_code cannot be None")
-
     discounts = {
         "SAVE10": 0.10,
         "SAVE20": 0.20,
