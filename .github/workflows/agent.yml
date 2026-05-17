@@ -207,6 +207,10 @@ jobs:
 
           # Create a branch for the fix
           BRANCH="agent/fix-issue-${{ github.event.issue.number }}"
+
+          # Delete remote branch if it exists from a previous run
+          git push origin --delete "$BRANCH" 2>/dev/null || true
+
           git checkout -b "$BRANCH"
 
           # Stage and commit (only tracked files, .gitignore handles junk)
